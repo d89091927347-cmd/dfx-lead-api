@@ -1,60 +1,66 @@
-// server.js
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
+app.use(express.json({ limit: "200kb" }));
 
-// =====================
-// Config
-// =====================
 const PORT = process.env.PORT || 10000;
-const BOT_TOKEN = process.env.BOT_TOKEN; // example: 123456789:AA....
-const CHAT_ID = process.env.CHAT_ID;     // example: -1001234567890
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const CHAT_ID = process.env.CHAT_ID;
 
-// Разрешаем запросы только с твоего сайта (можно расширить список)
+// ===== CORS (без cors-пакета) =====
 const ALLOWED_ORIGINS = new Set([
   "https://engineering.dfxcapital.ru",
+  "https://dfxcapital.ru",
   "http://engineering.dfxcapital.ru",
+  "http://dfxcapital.ru",
 ]);
 
-// =====================
-// CORS (без библиотек)
-// =====================
-app.use((req, res, next) => {
+function setCors(req, res) {
   const origin = req.headers.origin;
-
-  // Если запрос пришёл с разрешённого домена — разрешаем CORS
   if (origin && ALLOWED_ORIGINS.has(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
   }
-
-  // Разрешаем нужные заголовки/методы
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Max-Age", "86400");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
+}
 
-  // Preflight
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-
+app.use((req, res, next) => {
+  setCors(req, res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   next();
 });
 
-// =====================
-// Body parser
-// =====================
-app.use(express.json({ limit: "200kb" }));
+// ===== Utils =====
+const pickFirst = (obj, keys, fallback = "—") => {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return fallback;
+};
 
-// =====================
-// Health check
-// =====================
-app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "dfx-lead-api" });
-});
+const escapeHtml = (s) =>
+  String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 
-// =====================
-// Telegram sender
-// =====================
+const limit = (s, n) => {
+  const str = String(s);
+  return str.length > n ? str.slice(0, n) + "…" : str;
+};
+
+// ===== Health =====
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// ===== Telegram =====
 async function sendTelegramMessage(text) {
   if (!BOT_TOKEN) throw new Error("BOT_TOKEN is missing");
   if (!CHAT_ID) throw new Error("CHAT_ID is missing");
@@ -73,104 +79,99 @@ async function sendTelegramMessage(text) {
   });
 
   const rawText = await response.text();
-
   if (!response.ok) {
-    console.error("❌ Telegram HTTP error");
-    console.error("Status:", response.status);
-    console.error("Response:", rawText);
+    console.error("❌ Telegram HTTP error", response.status, rawText);
     throw new Error(`Telegram HTTP ${response.status}`);
   }
 
   let json;
   try {
     json = JSON.parse(rawText);
-  } catch (e) {
-    console.error("❌ Telegram returned non-JSON:", rawText);
+  } catch {
+    console.error("❌ Telegram returned non-JSON", rawText);
     throw new Error("Telegram invalid JSON");
   }
 
   if (!json.ok) {
-    console.error("❌ Telegram ok:false:", json);
+    console.error("❌ Telegram ok:false", json);
     throw new Error("Telegram ok:false");
   }
 
   return true;
 }
 
-// =====================
-// Helpers: normalize fields from different form names
-// =====================
-function pickFirst(obj, keys, fallback = "—") {
-  for (const k of keys) {
-    const v = obj?.[k];
-    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
-  }
-  return fallback;
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-// =====================
-// Lead endpoint
-// =====================
+// ===== Lead endpoint =====
 app.post("/lead", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // Сохраняем в лог, чтобы видеть реальные ключи, которые прилетают
-    console.log("📩 /lead body:", body);
+    // Вытаскиваем поля максимально “живуче” (под разные name/id)
+    const objectType = pickFirst(body, [
+      "objectType",
+      "type",
+      "objType",
+      "tip",
+      "tipObekta",
+      "object",
+    ]);
 
-    // Поддержка разных имён полей с фронта
-    const objectType = pickFirst(body, ["objectType", "type", "object", "projectType", "tip", "tip_obekta"]);
-    const stage = pickFirst(body, ["stage", "projectStage", "stage_project", "stadiya", "stadiya_proekta"]);
-    const timeline = pickFirst(body, ["timeline", "deadline", "term", "sroki", "time", "due"]);
-    const details = pickFirst(body, ["details", "concern", "problem", "comment", "message", "whatWorries", "worries"]);
-    const contact = pickFirst(body, ["contact", "phone", "tel", "telegram", "email"]);
+    const stage = pickFirst(body, ["stage", "projectStage", "stadiya", "stadia"]);
 
-    // Источник — либо из body, либо берём из origin/referer
-    const sourceRaw =
+    const timeline = pickFirst(body, [
+      "timeline",
+      "sroki",
+      "time",
+      "deadline",
+      "term",
+      "terms",
+    ]);
+
+    const concerns = pickFirst(body, [
+      "details",
+      "concerns",
+      "whatBothers",
+      "comment",
+      "message",
+      "desc",
+      "problem",
+    ]);
+
+    const contact = pickFirst(body, ["contact", "phone", "email", "tg", "telegram"]);
+
+    const name = pickFirst(body, ["name", "fio", "clientName"]);
+
+    // Источник: берём из body, если есть, иначе из заголовков
+    const source =
       pickFirst(body, ["source"], "") ||
-      req.get("origin") ||
-      req.get("referer") ||
+      req.headers.origin ||
+      req.headers.referer ||
       "—";
 
-    // Безопасно для HTML parse_mode
-    const msg = `
-<b>🆕 Новая заявка — инженерный аудит</b>
-
-<b>Тип объекта:</b> ${escapeHtml(objectType)}
-<b>Стадия:</b> ${escapeHtml(stage)}
-<b>Сроки:</b> ${escapeHtml(timeline)}
-
-<b>Что беспокоит:</b>
-${escapeHtml(details)}
-
-<b>Контакт:</b> ${escapeHtml(contact)}
-
-<b>Источник:</b> ${escapeHtml(sourceRaw)}
-    `.trim();
+    // Чистим/ограничиваем, чтобы Telegram HTML не ломался
+    const msg = [
+      "<b>🆕 Новая заявка — инженерный аудит</b>",
+      "",
+      `<b>Тип объекта:</b> ${escapeHtml(limit(objectType, 120))}`,
+      `<b>Имя:</b> ${escapeHtml(limit(name, 120))}`,
+      `<b>Контакт:</b> ${escapeHtml(limit(contact, 200))}`,
+      "",
+      `<b>Стадия:</b> ${escapeHtml(limit(stage, 120))}`,
+      `<b>Сроки:</b> ${escapeHtml(limit(timeline, 120))}`,
+      "",
+      `<b>Что беспокоит:</b>`,
+      escapeHtml(limit(concerns, 2000)),
+      "",
+      `<b>Источник:</b> ${escapeHtml(limit(source, 300))}`,
+    ].join("\n");
 
     await sendTelegramMessage(msg);
-
     res.json({ ok: true });
   } catch (error) {
     console.error("🔥 Lead processing error:", error);
-
-    res.status(500).json({
-      ok: false,
-      error: error?.message || "Unknown error",
-    });
+    res.status(500).json({ ok: false, error: error.message || "Server error" });
   }
 });
 
-// =====================
-// Start server
-// =====================
 app.listen(PORT, () => {
   console.log(`🚀 Lead API running on port ${PORT}`);
 });
