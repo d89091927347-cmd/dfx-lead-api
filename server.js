@@ -1,7 +1,21 @@
 import express from "express";
 import fetch from "node-fetch";
+import cors from "cors";
 
 const app = express();
+
+// ✅ CORS (чтобы браузер с сайта мог слать на Render)
+app.use(cors({
+  origin: [
+    "https://engineering.dfxcapital.ru"
+  ],
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"]
+}));
+
+// ✅ preflight (OPTIONS) — без этого будет CORS ошибка
+app.options("*", cors());
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
@@ -19,20 +33,14 @@ app.get("/health", (req, res) => {
 // Send message to Telegram
 // =====================
 async function sendTelegramMessage(text) {
-  if (!BOT_TOKEN) {
-    throw new Error("BOT_TOKEN is missing");
-  }
-  if (!CHAT_ID) {
-    throw new Error("CHAT_ID is missing");
-  }
+  if (!BOT_TOKEN) throw new Error("BOT_TOKEN is missing");
+  if (!CHAT_ID) throw new Error("CHAT_ID is missing");
 
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
 
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: CHAT_ID,
       text,
@@ -43,7 +51,6 @@ async function sendTelegramMessage(text) {
 
   const rawText = await response.text();
 
-  // ЛОГИРУЕМ ВСЁ, ЧТО ОТВЕТИЛ TELEGRAM
   if (!response.ok) {
     console.error("❌ Telegram HTTP error");
     console.error("Status:", response.status);
