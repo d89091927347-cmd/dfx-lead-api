@@ -1,36 +1,59 @@
+// server.js
 import express from "express";
 import fetch from "node-fetch";
-import cors from "cors";
 
 const app = express();
 
-// ✅ CORS (чтобы браузер с сайта мог слать на Render)
-app.use(cors({
-  origin: [
-    "https://engineering.dfxcapital.ru"
-  ],
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"]
-}));
-
-// ✅ preflight (OPTIONS) — без этого будет CORS ошибка
-app.options("*", cors());
-
-app.use(express.json());
-
+// =====================
+// Config
+// =====================
 const PORT = process.env.PORT || 10000;
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHAT_ID = process.env.CHAT_ID;
+const BOT_TOKEN = process.env.BOT_TOKEN; // example: 123456789:AA....
+const CHAT_ID = process.env.CHAT_ID;     // example: -1001234567890
+
+// Разрешаем запросы только с твоего сайта (можно расширить список)
+const ALLOWED_ORIGINS = new Set([
+  "https://engineering.dfxcapital.ru",
+  "http://engineering.dfxcapital.ru",
+]);
+
+// =====================
+// CORS (без библиотек)
+// =====================
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  // Если запрос пришёл с разрешённого домена — разрешаем CORS
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  // Разрешаем нужные заголовки/методы
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  // Preflight
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+
+  next();
+});
+
+// =====================
+// Body parser
+// =====================
+app.use(express.json({ limit: "200kb" }));
 
 // =====================
 // Health check
 // =====================
 app.get("/health", (req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, service: "dfx-lead-api" });
 });
 
 // =====================
-// Send message to Telegram
+// Telegram sender
 // =====================
 async function sendTelegramMessage(text) {
   if (!BOT_TOKEN) throw new Error("BOT_TOKEN is missing");
@@ -62,14 +85,12 @@ async function sendTelegramMessage(text) {
   try {
     json = JSON.parse(rawText);
   } catch (e) {
-    console.error("❌ Telegram returned non-JSON");
-    console.error(rawText);
+    console.error("❌ Telegram returned non-JSON:", rawText);
     throw new Error("Telegram invalid JSON");
   }
 
   if (!json.ok) {
-    console.error("❌ Telegram ok:false");
-    console.error(json);
+    console.error("❌ Telegram ok:false:", json);
     throw new Error("Telegram ok:false");
   }
 
@@ -77,44 +98,72 @@ async function sendTelegramMessage(text) {
 }
 
 // =====================
+// Helpers: normalize fields from different form names
+// =====================
+function pickFirst(obj, keys, fallback = "—") {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
+  }
+  return fallback;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+// =====================
 // Lead endpoint
 // =====================
 app.post("/lead", async (req, res) => {
   try {
-    const {
-      name = "—",
-      contact = "—",
-      stage = "—",
-      timeline = "—",
-      details = "—",
-      source = "—",
-    } = req.body || {};
+    const body = req.body || {};
 
-    const message = `
+    // Сохраняем в лог, чтобы видеть реальные ключи, которые прилетают
+    console.log("📩 /lead body:", body);
+
+    // Поддержка разных имён полей с фронта
+    const objectType = pickFirst(body, ["objectType", "type", "object", "projectType", "tip", "tip_obekta"]);
+    const stage = pickFirst(body, ["stage", "projectStage", "stage_project", "stadiya", "stadiya_proekta"]);
+    const timeline = pickFirst(body, ["timeline", "deadline", "term", "sroki", "time", "due"]);
+    const details = pickFirst(body, ["details", "concern", "problem", "comment", "message", "whatWorries", "worries"]);
+    const contact = pickFirst(body, ["contact", "phone", "tel", "telegram", "email"]);
+
+    // Источник — либо из body, либо берём из origin/referer
+    const sourceRaw =
+      pickFirst(body, ["source"], "") ||
+      req.get("origin") ||
+      req.get("referer") ||
+      "—";
+
+    // Безопасно для HTML parse_mode
+    const msg = `
 <b>🆕 Новая заявка — инженерный аудит</b>
 
-<b>Имя:</b> ${name}
-<b>Контакт:</b> ${contact}
+<b>Тип объекта:</b> ${escapeHtml(objectType)}
+<b>Стадия:</b> ${escapeHtml(stage)}
+<b>Сроки:</b> ${escapeHtml(timeline)}
 
-<b>Стадия:</b> ${stage}
-<b>Сроки:</b> ${timeline}
+<b>Что беспокоит:</b>
+${escapeHtml(details)}
 
-<b>Комментарий:</b>
-${details}
+<b>Контакт:</b> ${escapeHtml(contact)}
 
-<b>Источник:</b> ${source}
+<b>Источник:</b> ${escapeHtml(sourceRaw)}
     `.trim();
 
-    await sendTelegramMessage(message);
+    await sendTelegramMessage(msg);
 
     res.json({ ok: true });
   } catch (error) {
-    console.error("🔥 Lead processing error:");
-    console.error(error.message);
+    console.error("🔥 Lead processing error:", error);
 
     res.status(500).json({
       ok: false,
-      error: error.message,
+      error: error?.message || "Unknown error",
     });
   }
 });
